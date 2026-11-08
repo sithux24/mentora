@@ -33,7 +33,7 @@ python3 -m http.server 8000
 
 The key stays in your browser and is sent only to Google. It is never included in exports.
 
-If a model name stops working, type another one in the **Model** box (default `gemini-flash-latest`; the app also auto-switches if a model is not found, and **Settings → Find my models** lists what your key can use).
+If a model name stops working, type another one in the **Model** box (default `gemini-2.5-flash`).
 
 ## Put it online for free (pick one)
 
