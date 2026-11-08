@@ -35,6 +35,15 @@ The key stays in your browser and is sent only to Google. It is never included i
 
 If a model name stops working, type another one in the **Model** box (default `gemini-flash-latest`; the app also auto-switches if a model is not found, and **Settings → Find my models** lists what your key can use).
 
+## Voice (v5)
+
+- **🎤 Voice chat:** tap once and just talk. It records your voice, Gemini writes down what you said (Sinhala, English, or both in one sentence), the tutor answers, and the answer is read aloud in a natural Gemini voice. Then it listens again. Tap 🎤 again to stop.
+- **🎙️ Dictate:** speak and your words are typed into the message box so you can edit before sending. Tap 🎙️ again to finish early.
+- **Settings → Voice:** pick the voice (default **Sulafat**, warm; other friendly picks: Leda, Aoede, Zephyr, Achernar), speed, and the speaking style. **Preview voice** plays a sample.
+- Listening and speaking can each be switched back to the free browser engines in Settings.
+- Free Gemini quota is limited, and voice uses it (about 2 requests per spoken turn: one to understand you, one for the voice). If the natural voice hits a limit, the app falls back to the browser voice automatically.
+- The tutor's personality is a friendly older sister, and it answers in simple spoken Sinhala when you speak Sinhala.
+
 ## Put it online for free (pick one)
 
 **Netlify Drop (easiest):** open https://app.netlify.com/drop and drag the whole `mentora` folder onto the page. You get an https link immediately.

@@ -3,6 +3,8 @@
   const L = window.Lib, esc = L.esc;
   const KEY = 'mentora.v1';
   const COLORS = ['#4f46e5', '#0891b2', '#059669', '#d97706', '#e11d48', '#7c3aed', '#0d9488', '#ea580c'];
+  const VOICES_REC = [['Sulafat', 'Warm'], ['Leda', 'Youthful'], ['Aoede', 'Breezy'], ['Zephyr', 'Bright'], ['Achernar', 'Soft'], ['Vindemiatrix', 'Gentle'], ['Despina', 'Smooth'], ['Callirrhoe', 'Easy-going'], ['Kore', 'Firm'], ['Autonoe', 'Bright'], ['Laomedeia', 'Upbeat']];
+  const VOICES_MORE = [['Achird', 'Friendly'], ['Puck', 'Upbeat'], ['Charon', 'Informative'], ['Fenrir', 'Excitable'], ['Orus', 'Corporate'], ['Umbriel', 'Easy-going'], ['Enceladus', 'Breathy'], ['Iapetus', 'Clear'], ['Erinome', 'Clear'], ['Algieba', 'Smooth'], ['Algenib', 'Gravelly'], ['Rasalgethi', 'Informative'], ['Alnilam', 'Firm'], ['Schedar', 'Even'], ['Gacrux', 'Mature'], ['Pulcherrima', 'Forward'], ['Zubenelgenubi', 'Casual'], ['Sadachbia', 'Lively'], ['Sadaltager', 'Knowledgeable']];
   const PRESETS = ['Combined Maths', 'Physics', 'Chemistry', 'Biology', 'ICT', 'Economics', 'Accounting', 'English', 'Mathematics', 'Science'];
   const $ = (s, r) => (r || document).querySelector(s);
   const $$ = (s, r) => [...(r || document).querySelectorAll(s)];
@@ -11,7 +13,7 @@
   /* ---------------- state ---------------- */
   const def = () => ({
     profile: { name: '', examDate: '', level: 'A/L' },
-    settings: { key: '', model: 'gemini-flash-latest', lang: 'en-US', speak: false, theme: 'auto' },
+    settings: { key: '', model: 'gemini-flash-latest', lang: 'en-US', speak: false, theme: 'auto', listen: 'gemini', tts: 'gemini', ttsModel: 'gemini-3.8-flash-tts', voice: 'Sulafat', speed: 1, style: 'warm, friendly and encouraging, like a kind older sister explaining patiently, a little playful, clear and not too fast' },
     goal: 120, mode: 'hints', tutorSubject: '',
     subjects: [], sessions: [], marks: [], tasks: [], quizzes: [], chat: [], plan: null, timer: null, tutor: null
   });
@@ -87,13 +89,14 @@
       .map(m => m.name.replace(/^models\//, '')).filter(n => /^gemini-/.test(n) && !/tts|image|live|audio|embed|robotics|computer|vision|native|thinking/.test(n))
       .sort((x, y) => (rank(x) - rank(y)) || (pre(x) - pre(y)) || (ver(y) - ver(x)));
   }
-  async function gem(o) {
+  async function gemRaw(o) {
     const key = S.settings.key.trim();
     if (!key) throw new Error('Add your free Gemini API key in Settings first.');
     const model = o.model || S.settings.model || 'gemini-flash-latest';
     const body = { contents: o.contents, generationConfig: { temperature: o.temp ?? 0.5 } };
     if (o.system) body.systemInstruction = { parts: [{ text: o.system }] };
     if (o.json) body.generationConfig.responseMimeType = 'application/json';
+    if (o.fast && !o.nofast) body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) +
       (o.stream ? ':streamGenerateContent?alt=sse' : ':generateContent');
     const doFetch = () => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body), signal: o.signal });
@@ -103,11 +106,15 @@
       const names = await listModels(key).catch(() => []);
       for (const c of names.filter(n => n !== model).slice(0, 5)) {
         try {
-          const out = await gem(Object.assign({}, o, { model: c, retried: true }));
+          const out = await gemRaw(Object.assign({}, o, { model: c, retried: true }));
           S.settings.model = c; save(); toast('Switched to model ' + c); return out;
         } catch (e) { if (!/not found/i.test(e.message)) throw e; }
       }
       throw new Error('That model was not found, and no other model worked. Models your key lists: ' + (names.slice(0, 8).join(', ') || 'none') + '. Type one into Settings → Model.');
+    }
+    if (r.status === 400 && o.fast && !o.nofast) {
+      const t = await r.clone().text();
+      if (/thinking/i.test(t)) return gemRaw(Object.assign({}, o, { nofast: true }));
     }
     if (!r.ok) { let m = ''; try { m = (await r.json()).error.message; } catch (e) { /* ignore */ } throw new Error(friendly(r.status, m)); }
     const textOf = j => {
@@ -133,7 +140,17 @@
     }
     return full;
   }
-  const ask = (prompt, system) => gem({ system, contents: [{ role: 'user', parts: [{ text: prompt }] }] });
+  async function gem(o) {
+    const ctl = new AbortController(); let timedOut = false;
+    const to = setTimeout(() => { timedOut = true; ctl.abort(); }, o.timeout || 90000);
+    if (o.signal) o.signal.addEventListener('abort', () => ctl.abort());
+    try { return await gemRaw(Object.assign({}, o, { signal: ctl.signal })); }
+    catch (e) {
+      if (e.name === 'AbortError' && timedOut) throw new Error('The AI took too long. Try again, or choose a faster "flash-lite" model in Settings.');
+      throw e;
+    } finally { clearTimeout(to); }
+  }
+  const ask = (prompt, system) => gem({ system, fast: true, contents: [{ role: 'user', parts: [{ text: prompt }] }] });
 
   function studentContext() {
     const subs = S.subjects.map(s => {
@@ -160,7 +177,10 @@ Rules:
 - Double-check every calculation before stating it. If you are unsure, say so.
 - If the student uploads a photo or PDF of their working, read it carefully, go line by line, say what is right, and point to the first mistake and why.
 - Keep replies focused and not too long. Match the student's language (English, Sinhala or Tamil).
-- Be encouraging. Finish with a short next step or question when helpful.
+- Personality: warm, encouraging and a little playful, like a friendly older sister (akka) who is also a great teacher. Use the student's name now and then. Never talk down to them.
+- If the student writes or speaks Sinhala (or mixes Sinhala and English), answer in simple, natural spoken Sinhala, keeping technical and maths terms in English where students normally say them in English.
+${voiceMode ? '- This reply will be read ALOUD: keep it short (under about 120 words), no tables or code blocks, and say formulas in simple words.' : ''}
+- Finish with a short next step or question when helpful.
 Student context (use it to personalise, do not recite it): ${studentContext()}`;
   }
 
@@ -322,9 +342,18 @@ Student context (use it to personalise, do not recite it): ${studentContext()}`;
         <label class="wide">Gemini API key<input name="key" type="password" autocomplete="off" value="${esc(S.settings.key)}" placeholder="AIza..."></label>
         <label>Model<input name="model" list="models" value="${esc(S.settings.model)}"></label>
         <datalist id="models"><option>gemini-flash-latest</option><option>gemini-3.8-flash</option><option>gemini-3.6-flash</option><option>gemini-3.5-flash-lite</option><option>gemini-3.1-flash-lite</option></datalist>
-        <label>Voice language<select name="lang">${[['en-US', 'English (US)'], ['en-GB', 'English (UK)'], ['si-LK', 'Sinhala'], ['ta-LK', 'Tamil']].map(([v, n]) => `<option value="${v}"${v === S.settings.lang ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
-        <label class="check"><input type="checkbox" name="speak" ${S.settings.speak ? 'checked' : ''}> Read replies aloud automatically</label>
         <button class="btn primary">Save</button><button type="button" class="btn" data-act="testKey">Test key</button><button type="button" class="btn" data-act="findModels">Find my models</button></form></section>
+    <section class="card"><h3>Voice 🎤</h3>
+      <p class="muted">Listening and the natural voice both use your Gemini key (each voice turn uses a couple of requests from your free quota).</p>
+      <form data-form="voice" class="fgrid">
+        <label>Listening (microphone)<select name="listen"><option value="gemini"${S.settings.listen === 'gemini' ? ' selected' : ''}>Gemini: Sinhala + English mixed (recommended)</option><option value="browser"${S.settings.listen === 'browser' ? ' selected' : ''}>Browser: free, one language only</option></select></label>
+        <label>Speaking<select name="tts"><option value="gemini"${S.settings.tts === 'gemini' ? ' selected' : ''}>Gemini natural voice</option><option value="browser"${S.settings.tts === 'browser' ? ' selected' : ''}>Browser voice (fast, offline)</option></select></label>
+        <label>Voice<select name="voice"><optgroup label="Recommended for a friendly-sister feel">${VOICES_REC.map(([n, d]) => `<option value="${n}"${n === S.settings.voice ? ' selected' : ''}>${n} · ${d}</option>`).join('')}</optgroup><optgroup label="More voices">${VOICES_MORE.map(([n, d]) => `<option value="${n}"${n === S.settings.voice ? ' selected' : ''}>${n} · ${d}</option>`).join('')}</optgroup></select></label>
+        <label>Speed <output id="spv">${(+S.settings.speed || 1).toFixed(2)}×</output><input type="range" name="speed" min="0.7" max="1.4" step="0.05" value="${+S.settings.speed || 1}"></label>
+        <label class="wide">Speaking style (how the voice should sound)<input name="style" value="${esc(S.settings.style)}"></label>
+        <label>Browser voice language (fallback)<select name="lang">${[['en-US', 'English (US)'], ['en-GB', 'English (UK)'], ['si-LK', 'Sinhala'], ['ta-LK', 'Tamil']].map(([v, n]) => `<option value="${v}"${v === S.settings.lang ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
+        <label class="check"><input type="checkbox" name="speak" ${S.settings.speak ? 'checked' : ''}> Read tutor replies aloud automatically (voice chat always does)</label>
+        <button class="btn primary">Save</button><button type="button" class="btn" data-act="previewVoice">▶ Preview voice</button><button type="button" class="btn" data-act="findTts">Find voice model</button></form></section>
     <section class="card"><h3>Appearance & app</h3><div class="row wrap">
       <select id="theme">${[['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']].map(([v, n]) => `<option value="${v}"${v === S.settings.theme ? ' selected' : ''}>${n}</option>`).join('')}</select>
       <button class="btn" data-act="install" id="installBtn" hidden>Install app</button></div></section>
@@ -334,9 +363,10 @@ Student context (use it to personalise, do not recite it): ${studentContext()}`;
       <button class="btn danger" data-act="reset">Erase everything</button></div></section>`;
 
   /* ---- quiz ---- */
+  let quizCtl = null;
   let Q = { phase: 'setup', items: [], meta: {}, err: '' };
   VIEWS.quiz = () => {
-    if (Q.phase === 'loading') return `<header class="top"><h1>Quiz</h1></header><section class="card"><p>🧠 Writing your questions…</p></section>`;
+    if (Q.phase === 'loading') return `<header class="top"><h1>Quiz</h1></header><section class="card"><p>🧠 Writing your questions… <b id="qsec">0</b>s</p><p class="muted" id="qprog">Contacting the AI…</p><button class="btn" data-act="quizCancel">Cancel</button></section>`;
     if (Q.phase === 'run' || Q.phase === 'done') {
       const done = Q.phase === 'done';
       const score = done ? Q.items.filter((q, i) => Q.answers[i] === q.answer).length : 0;
@@ -364,15 +394,19 @@ Student context (use it to personalise, do not recite it): ${studentContext()}`;
     Q = { phase: 'loading', items: [], meta: { subjectId, topic, n, diff }, err: '' }; render();
     const prompt = `Create ${n} multiple-choice questions for a ${S.profile.level} student.
 Subject: ${sname(subjectId)}. Topic: ${topic}. Difficulty: ${diff}.
-Return ONLY JSON: {"questions":[{"q":"question text","options":["A","B","C","D"],"answer":0,"explain":"short worked explanation"}]}
+Return ONLY JSON: {"questions":[{"q":"question text","options":["A","B","C","D"],"answer":0,"explain":"one or two short sentences"}]}
 Rules: exactly 4 options per question; "answer" is the 0-based index of the single correct option; write maths in LaTeX using $...$; make sure the keyed answer is truly correct (re-check calculations); vary the correct position; plausible distractors based on common mistakes. Student context: ${studentContext()}`;
+    const t0 = Date.now(); quizCtl = new AbortController();
+    const tick = setInterval(() => { const e = $('#qsec'); if (e) e.textContent = Math.round((Date.now() - t0) / 1000); else clearInterval(tick); }, 500);
     try {
-      const raw = await gem({ contents: [{ role: 'user', parts: [{ text: prompt }] }], json: true, temp: 0.7 });
+      const raw = await gem({ contents: [{ role: 'user', parts: [{ text: prompt }] }], json: true, fast: true, stream: true, temp: 0.7, signal: quizCtl.signal, timeout: 120000,
+        onChunk: t => { const e = $('#qprog'); if (e) e.textContent = 'Writing… ' + t.length + ' characters received'; } });
       const j = L.parseJsonLoose(raw);
       const items = (j.questions || []).filter(q => q && q.q && Array.isArray(q.options) && q.options.length >= 2 && Number.isInteger(q.answer) && q.answer >= 0 && q.answer < q.options.length);
       if (!items.length) throw new Error('The AI returned no usable questions. Try again.');
       Q = { phase: 'run', items, answers: [], meta: Q.meta, err: '' };
-    } catch (e) { Q = { phase: 'setup', items: [], meta: {}, err: e.message }; }
+    } catch (e) { Q = { phase: 'setup', items: [], meta: {}, err: e.name === 'AbortError' ? 'Cancelled.' : e.message }; }
+    clearInterval(tick); quizCtl = null;
     if (route() === 'quiz') render();
   }
 
@@ -390,10 +424,12 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
     <div id="msgs">${S.chat.length ? S.chat.map(msgHTML).join('') : `<div class="empty"><h2>Ask me anything 🎓</h2><p>Type, speak, or attach a photo or PDF of a question or your working. I'll ${S.mode === 'hints' ? 'guide you with hints' : 'show full worked solutions'}.</p>
       <div class="chips">${['Explain integration by parts', 'Help me solve x² − 5x + 6 = 0', 'Plot y = sin(x) and y = cos(x)', 'Make me a revision plan'].map(p => `<button class="chip" data-act="sample" data-p="${esc(p)}">${esc(p)}</button>`).join('')}</div></div>`}</div>
     <div id="attach"></div>
+    <div id="vstat" class="vstat" hidden></div>
     <form id="chatform" data-form="chat">
       <label class="ib" title="Attach image or PDF">📎<input type="file" id="fpick" accept="image/*,application/pdf" multiple hidden></label>
       <label class="ib" title="Take a photo">📷<input type="file" id="fcam" accept="image/*" capture="environment" hidden></label>
-      <button type="button" class="ib ${voiceMode ? 'live' : ''}" data-act="mic" id="micBtn" title="Voice chat">🎤</button>
+      <button type="button" class="ib" data-act="dictate" id="dictBtn" title="Dictate: speak, and it types your words (Sinhala + English)">🎙️</button>
+      <button type="button" class="ib ${voiceMode ? 'live' : ''}" data-act="mic" id="micBtn" title="Voice chat: talk back and forth">🎤</button>
       <textarea id="chatin" rows="1" placeholder="Ask a question…" aria-label="Message"></textarea>
       <button class="btn primary" id="sendBtn" data-act="${busy ? 'stop' : 'send'}">${busy ? '■' : '➤'}</button></form></div>`;
   AFTER.tutor = () => {
@@ -453,7 +489,7 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
     S.chat.push(ai);
     const now = Date.now();
     S.tutor = S.tutor ? Object.assign(S.tutor, { last: now }) : { start: now - 60000, last: now, subjectId: S.tutorSubject };
-    busy = true; abortCtl = new AbortController(); renderAttach(); renderMsgs();
+    busy = true; abortCtl = new AbortController(); renderAttach(); renderMsgs(); if (voiceMode) setVStat('💭 Thinking…');
     const hist = S.chat.slice(0, -1).slice(-17);
     const lastUsers = hist.map((m, i) => (m.role === 'user' ? i : -1)).filter(i => i >= 0).slice(-3);
     const contents = hist.map((m, i) => {
@@ -464,7 +500,7 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
     });
     while (contents.length && contents[0].role !== 'user') contents.shift();
     try {
-      await gem({ system: tutorSystem(), contents, stream: true, signal: abortCtl.signal, temp: 0.4, onChunk: t => { ai.text = t; const el = $('#msgs .msg:last-child .bub'); if (el) { el.innerHTML = md(t); const m = $('#msgs'); if (m.scrollHeight - m.scrollTop - m.clientHeight < 160) m.scrollTop = m.scrollHeight; } } });
+      await gem({ system: tutorSystem(), contents, stream: true, signal: abortCtl.signal, temp: 0.4, timeout: 180000, onChunk: t => { ai.text = t; const el = $('#msgs .msg:last-child .bub'); if (el) { el.innerHTML = md(t); const m = $('#msgs'); if (m.scrollHeight - m.scrollTop - m.clientHeight < 160) m.scrollTop = m.scrollHeight; } } });
       if (!ai.text) { ai.text = 'I could not produce an answer. Please rephrase or try again.'; ai.err = true; }
     } catch (e) {
       if (e.name === 'AbortError') { if (!ai.text) ai.text = '(stopped)'; }
@@ -472,19 +508,124 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
     }
     busy = false; abortCtl = null;
     if (S.chat.length > 80) S.chat = S.chat.slice(-80);
-    S.tutor.last = Date.now(); save(); renderMsgs();
+    S.tutor.last = Date.now(); save(); renderMsgs(); setVStat('');
     if (!ai.err && (voiceMode || S.settings.speak)) speak(ai.text, () => { if (voiceMode) listen(); });
     else if (voiceMode) { voiceMode = false; updMic(); }
   }
-  function speak(text, done) {
-    if (!('speechSynthesis' in window)) { toast('Reading aloud is not supported here'); done && done(); return; }
+  /* ---- audio helpers ---- */
+  function b64ToBytes(b64) { const bin = atob(b64), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; }
+  function bytesToB64(u8) { let s = ''; const C = 0x8000; for (let i = 0; i < u8.length; i += C) s += String.fromCharCode.apply(null, u8.subarray(i, i + C)); return btoa(s); }
+  function pcmToWav(pcm, rate) {
+    const h = new DataView(new ArrayBuffer(44)), w = (o, t) => { for (let i = 0; i < t.length; i++) h.setUint8(o + i, t.charCodeAt(i)); };
+    w(0, 'RIFF'); h.setUint32(4, 36 + pcm.length, true); w(8, 'WAVE'); w(12, 'fmt '); h.setUint32(16, 16, true); h.setUint16(20, 1, true); h.setUint16(22, 1, true);
+    h.setUint32(24, rate, true); h.setUint32(28, rate * 2, true); h.setUint16(32, 2, true); h.setUint16(34, 16, true); w(36, 'data'); h.setUint32(40, pcm.length, true);
+    const out = new Uint8Array(44 + pcm.length); out.set(new Uint8Array(h.buffer), 0); out.set(pcm, 44); return out;
+  }
+  async function blobToWav16kB64(blob) {
+    const ab = await blob.arrayBuffer(), AC = window.AudioContext || window.webkitAudioContext, ctx = new AC();
+    const buf = await new Promise((res, rej) => { const p = ctx.decodeAudioData(ab, res, rej); if (p && p.catch) p.catch(rej); });
+    ctx.close().catch(() => { });
+    const off = new OfflineAudioContext(1, Math.max(1, Math.ceil(buf.duration * 16000)), 16000), src = off.createBufferSource();
+    src.buffer = buf; src.connect(off.destination); src.start();
+    const f = (await off.startRendering()).getChannelData(0), pcm = new Int16Array(f.length);
+    for (let i = 0; i < f.length; i++) { const v = Math.max(-1, Math.min(1, f[i])); pcm[i] = v < 0 ? v * 0x8000 : v * 0x7fff; }
+    return bytesToB64(pcmToWav(new Uint8Array(pcm.buffer), 16000));
+  }
+
+  /* ---- speaking: Gemini natural voice, browser voice as fallback ---- */
+  let audioEl = null, speakTok = 0, ttsCtl = null, ttsFmt = 'new', ttsWarned = false;
+  const getAudio = () => { if (!audioEl) audioEl = new Audio(); return audioEl; };
+  function unlockAudio() { try { const a = getAudio(); a.src = URL.createObjectURL(new Blob([pcmToWav(new Uint8Array(2), 8000)], { type: 'audio/wav' })); a.play().catch(() => { }); } catch (e) { /* ignore */ } }
+  const setVStat = t => { const e = $('#vstat'); if (e) { e.textContent = t || ''; e.hidden = !t; } };
+  function stopSpeaking() {
+    speakTok++; speaking = false;
+    if (ttsCtl) { try { ttsCtl.abort(); } catch (e) { /* ignore */ } ttsCtl = null; }
+    if (audioEl) { try { audioEl.pause(); audioEl.onended = audioEl.onerror = null; } catch (e) { /* ignore */ } }
+    if ('speechSynthesis' in window) speechSynthesis.cancel();
+    setVStat('');
+  }
+  function chunkText(t, max) {
+    const sents = t.match(/[^.!?\n]+[.!?]?/g) || [t], out = []; let cur = '';
+    for (const x of sents) {
+      if (cur && (cur + x).length > max) { out.push(cur.trim()); cur = ''; }
+      cur += x + ' ';
+      while (cur.length > max * 1.5) { out.push(cur.slice(0, max)); cur = cur.slice(max); }
+    }
+    if (cur.trim()) out.push(cur.trim());
+    return out.filter(Boolean);
+  }
+  async function ttsModelList(key) {
+    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': key } });
+    if (!r.ok) throw new Error(friendly(r.status, ''));
+    const ver = n => parseFloat((n.match(/(\d+(?:\.\d+)?)/) || [0, 0])[1]);
+    return ((await r.json()).models || []).map(m => m.name.replace(/^models\//, '')).filter(n => /tts/.test(n))
+      .sort((a, b) => (/preview/.test(a) - /preview/.test(b)) || (/lite/.test(a) - /lite/.test(b)) || (ver(b) - ver(a)));
+  }
+  async function ttsFetch(text, signal) {
+    const key = S.settings.key.trim(); if (!key) throw new Error('Add your Gemini key in Settings');
+    const style = S.settings.style, voice = S.settings.voice || 'Sulafat';
+    const make = fmt => (fmt === 'new'
+      ? { contents: [{ role: 'user', parts: [{ text, speech_metadata: { style } }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { voice } } } }
+      : { contents: [{ role: 'user', parts: [{ text: 'Say in a ' + style + ' tone: ' + text }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } } } });
+    const call = (model, fmt) => fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(make(fmt)), signal });
+    const tryModel = async model => {
+      const order = ttsFmt === 'new' ? ['new', 'old'] : ['old', 'new']; let r;
+      for (const f of order) { r = await call(model, f); if (r.status !== 400) { ttsFmt = f; return r; } }
+      return r;
+    };
+    let model = S.settings.ttsModel || 'gemini-3.8-flash-tts', r = await tryModel(model);
+    if (r.status === 404) {
+      for (const m of (await ttsModelList(key).catch(() => [])).filter(n => n !== model).slice(0, 4)) {
+        const r2 = await tryModel(m);
+        if (r2.ok) { S.settings.ttsModel = m; save(); r = r2; break; }
+      }
+    }
+    if (!r.ok) { let m = ''; try { m = (await r.json()).error.message; } catch (e) { /* ignore */ } throw new Error(r.status === 404 ? 'no voice model found for your key' : friendly(r.status, m)); }
+    const j = await r.json();
+    const part = ((j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || []).find(x => x.inlineData);
+    if (!part) throw new Error('no audio returned');
+    const mt = part.inlineData.mimeType || '', bytes = b64ToBytes(part.inlineData.data);
+    const wav = /wav/i.test(mt) ? bytes : pcmToWav(bytes, +((mt.match(/rate=(\d+)/) || [])[1]) || 24000);
+    return URL.createObjectURL(new Blob([wav], { type: 'audio/wav' }));
+  }
+  function playUrl(url) {
+    return new Promise((res, rej) => {
+      const a = getAudio(), sp = Math.min(1.5, Math.max(0.6, +S.settings.speed || 1));
+      a.onended = () => res(); a.onerror = () => rej(new Error('audio playback failed'));
+      a.defaultPlaybackRate = sp; a.src = url;
+      a.play().then(() => { a.playbackRate = sp; }).catch(rej);
+    });
+  }
+  async function speak(text, done) {
+    stopSpeaking();
+    const tok = speakTok, plain = L.speakable(text).slice(0, 2600);
+    if (!plain) { done && done(); return; }
+    speaking = true; setVStat('🔊 Speaking… (tap 🎤 to stop)');
+    const fin = () => { if (tok !== speakTok) return; speaking = false; setVStat(''); done && done(); };
+    if (S.settings.tts === 'gemini' && S.settings.key.trim()) {
+      try {
+        const ctl = new AbortController(); ttsCtl = ctl;
+        const parts = chunkText(plain, 900), start = i => { const p = ttsFetch(parts[i], ctl.signal); p.catch(() => { }); return p; };
+        let next = start(0);
+        for (let i = 0; i < parts.length; i++) {
+          const url = await next; if (tok !== speakTok) { URL.revokeObjectURL(url); return; }
+          if (i + 1 < parts.length) next = start(i + 1);
+          try { await playUrl(url); } finally { URL.revokeObjectURL(url); }
+          if (tok !== speakTok) return;
+        }
+        return fin();
+      } catch (e) {
+        if (tok !== speakTok || e.name === 'AbortError') return;
+        if (!ttsWarned) { toast('Natural voice unavailable (' + e.message + '). Using the browser voice.'); ttsWarned = true; }
+      }
+    }
+    if (!('speechSynthesis' in window)) { toast('Reading aloud is not supported here'); return fin(); }
     speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(L.speakable(text)); u.lang = S.settings.lang; u.rate = 0.95;
-    speaking = true; u.onend = u.onerror = () => { speaking = false; done && done(); };
-    speechSynthesis.speak(u);
+    const u = new SpeechSynthesisUtterance(plain); u.lang = S.settings.lang; u.rate = Math.min(1.4, Math.max(0.7, (+S.settings.speed || 1) * 0.95));
+    u.onend = u.onerror = fin; speechSynthesis.speak(u);
   }
   const updMic = () => { const b = $('#micBtn'); if (b) b.classList.toggle('live', voiceMode); };
-  function listen() {
+  function listenBrowser() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { toast('Voice input is not supported in this browser. Try Chrome.'); voiceMode = false; updMic(); return; }
     if (rec) { try { rec.abort(); } catch (e) { /* ignore */ } }
@@ -500,6 +641,58 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
     try { rec.start(); } catch (e) { /* already started */ }
   }
 
+  /* ---- listening: record, then Gemini transcribes Sinhala + English together ---- */
+  let mrec = null, vadTimer = null, recCancel = false, manualStop = false;
+  function stopRecording(cancel, manual) { recCancel = !!cancel; manualStop = !!manual; clearInterval(vadTimer); try { if (mrec && mrec.state !== 'inactive') mrec.stop(); } catch (e) { /* ignore */ } }
+  function listen() { return S.settings.listen === 'browser' ? listenBrowser() : recordTurn(false); }
+  async function transcribe(blob) {
+    const data = await blobToWav16kB64(blob);
+    const prompt = 'Transcribe the speech in this audio exactly as spoken. The speaker may speak Sinhala, English, or mix both in one sentence. Write Sinhala words in Sinhala script and English words in English letters; maths and science terms said in English stay in English. Output ONLY the transcript. If there is no clear human speech, output exactly: [none]';
+    const t = await gem({ contents: [{ role: 'user', parts: [{ inlineData: { mimeType: 'audio/wav', data } }, { text: prompt }] }], fast: true, temp: 0, timeout: 60000 });
+    const x = (t || '').trim().replace(/^["“”]+|["“”]+$/g, '').trim();
+    return /^\[?\s*none\s*\]?\.?$/i.test(x) ? '' : x;
+  }
+  async function recordTurn(dictate) {
+    if (!navigator.mediaDevices || !window.MediaRecorder) { toast('Recording is not supported in this browser. Set Listening to "Browser" in Settings.'); voiceMode = false; updMic(); return; }
+    stopRecording(true);
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
+    catch (e) { toast('Microphone permission was blocked.'); voiceMode = false; updMic(); return; }
+    const chunks = [], mr = new MediaRecorder(stream), AC = window.AudioContext || window.webkitAudioContext, ac = new AC(), an = ac.createAnalyser();
+    mrec = mr; recCancel = false; manualStop = false; an.fftSize = 1024; ac.createMediaStreamSource(stream).connect(an);
+    const buf = new Float32Array(an.fftSize), t0 = Date.now(), calib = []; let spoke = false, last = 0, floor = 0.012;
+    mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    const db = $('#dictBtn'); if (db) db.classList.toggle('live', !!dictate);
+    setVStat(dictate ? '🎙️ Speak… tap 🎙️ again to finish' : '🎤 Listening… speak now');
+    mr.start(250);
+    vadTimer = setInterval(() => {
+      an.getFloatTimeDomainData(buf); let sum = 0; for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      const rms = Math.sqrt(sum / buf.length), now = Date.now();
+      if (now - t0 < 300) { calib.push(rms); floor = Math.min(0.04, Math.max(0.012, calib.reduce((a, b) => a + b, 0) / calib.length * 2.5)); return; }
+      if (rms > floor) { spoke = true; last = now; }
+      if ((spoke && now - last > 1500) || (!spoke && now - t0 > 9000) || now - t0 > 45000) stopRecording(false, false);
+    }, 100);
+    mr.onstop = async () => {
+      clearInterval(vadTimer); stream.getTracks().forEach(t => t.stop()); ac.close().catch(() => { }); mrec = null;
+      const b = $('#dictBtn'); if (b) b.classList.remove('live');
+      if (recCancel) { setVStat(''); return; }
+      if (!spoke && !manualStop) { setVStat(''); if (voiceMode && !busy && !speaking) setTimeout(() => voiceMode && !busy && !speaking && listen(), 300); return; }
+      setVStat('✍️ Understanding…');
+      try {
+        const text = await transcribe(new Blob(chunks, { type: mr.mimeType || 'audio/webm' }));
+        setVStat('');
+        if (!text) { toast("I didn't catch that. Please try again."); if (voiceMode && !busy && !speaking) listen(); return; }
+        if (dictate) { const ta = $('#chatin'); if (ta) { ta.value = (ta.value ? ta.value + ' ' : '') + text; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.focus(); } return; }
+        send(text);
+      } catch (e) { setVStat(''); toast(e.message || 'Could not understand the audio'); voiceMode = false; updMic(); }
+    };
+  }
+  function readVoiceForm(f, quiet) {
+    const g = n => f.elements[n];
+    S.settings.listen = g('listen').value; S.settings.tts = g('tts').value; S.settings.voice = g('voice').value;
+    S.settings.speed = +g('speed').value || 1; S.settings.style = g('style').value.trim() || def().settings.style;
+    S.settings.lang = g('lang').value; S.settings.speak = g('speak').checked; save();
+  }
   /* ---------------- events ---------------- */
   const ACT = {
     quickSubject(el) { if (!S.subjects.some(s => s.name === el.dataset.name)) { S.subjects.push({ id: uid(), name: el.dataset.name, target: 75, color: COLORS[S.subjects.length % COLORS.length] }); save(); render(); } },
@@ -532,15 +725,33 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
     },
     mode(el) { S.mode = el.dataset.m; save(); $$('.seg button').forEach(b => b.classList.toggle('on', b.dataset.m === S.mode)); toast(S.mode === 'hints' ? 'Hints mode: the tutor guides you step by step' : 'Worked mode: full solutions'); },
     sample(el) { send(el.dataset.p); },
-    send() { const ta = $('#chatin'); const v = ta.value; ta.value = ''; ta.style.height = ''; send(v); },
+    send() { unlockAudio(); const ta = $('#chatin'); const v = ta.value; ta.value = ''; ta.style.height = ''; send(v); },
     stop() { abortCtl && abortCtl.abort(); },
     clearChat() { if (!S.chat.length || confirm('Start a new chat? (Your study log keeps the time.)')) { flushTutor(true); S.chat = []; pending = []; save(); render(); } },
     logTutor() { flushTutor(true); },
     rmAttach(el) { pending.splice(+el.dataset.i, 1); renderAttach(); },
-    speak(el) { const m = S.chat[+el.dataset.i]; if (m) { if (speaking) { speechSynthesis.cancel(); speaking = false; } else speak(m.text); } },
+    speak(el) { const m = S.chat[+el.dataset.i]; if (m) { unlockAudio(); if (speaking) stopSpeaking(); else speak(m.text); } },
     copy(el) { const m = S.chat[+el.dataset.i]; if (m && navigator.clipboard) navigator.clipboard.writeText(m.text).then(() => toast('Copied')); },
-    mic() { voiceMode = !voiceMode; updMic(); if (voiceMode) { speechSynthesis.cancel(); listen(); } else { try { rec && rec.abort(); } catch (e) { /* ignore */ } speechSynthesis.cancel(); } },
+    mic() {
+      voiceMode = !voiceMode; updMic();
+      if (voiceMode) { unlockAudio(); stopSpeaking(); listen(); }
+      else { stopRecording(true); try { rec && rec.abort(); } catch (e) { /* ignore */ } stopSpeaking(); setVStat(''); }
+    },
+    dictate() { if (mrec) return stopRecording(false, true); unlockAudio(); voiceMode = false; updMic(); stopSpeaking(); recordTurn(true); },
+    async previewVoice(el) {
+      readVoiceForm(el.closest('form'), true); unlockAudio(); el.disabled = true;
+      await speak(`Hi ${S.profile.name || 'there'}! I'm your tutor. You've got this, and we'll do it together, step by step. ඔයාට පුළුවන්, අපි එකට කරමු!`);
+      el.disabled = false;
+    },
+    async findTts(el) {
+      const key = S.settings.key.trim(); if (!key) return toast('Save your API key first');
+      el.disabled = true;
+      try { const n = await ttsModelList(key); if (n.length) { S.settings.ttsModel = n[0]; save(); toast('Using voice model ' + n[0]); } else toast('No voice (TTS) model found for this key. The browser voice will be used.'); }
+      catch (e) { toast(e.message); }
+      el.disabled = false;
+    },
     fillTopic(el) { $('#qtopic').value = el.dataset.topic; const s = $('select[name=subjectId]'); if (s) s.value = el.dataset.sub; },
+    quizCancel() { quizCtl && quizCtl.abort(); },
     quizNew() { Q = { phase: 'setup', items: [], meta: {}, err: '' }; render(); },
     askTutor(el) {
       const q = Q.items[+el.dataset.i];
@@ -587,7 +798,7 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
       f.text().then(t => { const j = JSON.parse(t); if (!j || typeof j !== 'object' || !Array.isArray(j.subjects)) throw 0; const k = S.settings.key; S = Object.assign(def(), j); S.settings = Object.assign(def().settings, j.settings, { key: k }); save(); render(); toast('Backup imported'); }).catch(() => toast('That is not a valid backup file'));
     }
   });
-  document.addEventListener('input', e => { if (e.target.id === 'chatin') { e.target.style.height = 'auto'; e.target.style.height = Math.min(140, e.target.scrollHeight) + 'px'; } });
+  document.addEventListener('input', e => { if (e.target.name === 'speed') { const o = $('#spv'); if (o) o.textContent = (+e.target.value).toFixed(2) + '×'; } if (e.target.id === 'chatin') { e.target.style.height = 'auto'; e.target.style.height = Math.min(140, e.target.scrollHeight) + 'px'; } });
   document.addEventListener('keydown', e => { if (e.target.id === 'chatin' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); ACT.send(); } });
   document.addEventListener('paste', e => { if (e.target.id === 'chatin') { const fs = [...(e.clipboardData ? e.clipboardData.files : [])]; if (fs.length) { e.preventDefault(); addFiles(fs); } } });
   document.addEventListener('submit', e => {
@@ -600,7 +811,8 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
     else if (k === 'task') { S.tasks.push({ id: uid(), title: v('title').trim(), subjectId: v('subjectId'), pri: v('pri'), due: v('due'), done: false }); }
     else if (k === 'subject') { S.subjects.push({ id: uid(), name: v('name').trim(), target: Math.min(100, Math.max(1, +v('target'))), color: v('color') }); }
     else if (k === 'profile') { S.profile.name = v('name').trim(); S.profile.level = v('level'); S.profile.examDate = v('examDate'); S.goal = Math.max(15, +v('goal') || 120); }
-    else if (k === 'ai') { S.settings.key = v('key').trim(); S.settings.model = v('model').trim() || 'gemini-flash-latest'; S.settings.lang = v('lang'); S.settings.speak = f.elements.speak.checked; }
+    else if (k === 'ai') { S.settings.key = v('key').trim(); S.settings.model = v('model').trim() || 'gemini-flash-latest'; }
+    else if (k === 'voice') { readVoiceForm(f); }
     else if (k === 'quizstart') { return makeQuiz(f); }
     else if (k === 'quizsubmit') {
       Q.answers = Q.items.map((_, i) => { const c = f.querySelector(`input[name=q${i}]:checked`); return c ? +c.value : -1; });
@@ -626,7 +838,7 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
   }
   let deferredInstall = null;
   window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredInstall = e; const b = $('#installBtn'); if (b) b.hidden = false; });
-  window.addEventListener('hashchange', () => { if (route() !== 'tutor' && voiceMode) { voiceMode = false; try { rec && rec.abort(); } catch (e) { /* ignore */ } speechSynthesis.cancel(); } render(); });
+  window.addEventListener('hashchange', () => { if (route() !== 'tutor') { voiceMode = false; stopRecording(true); try { rec && rec.abort(); } catch (e) { /* ignore */ } stopSpeaking(); } render(); });
   window.addEventListener('load', () => { if (window.katex) render(); });
   window.addEventListener('pagehide', () => { flushTutor(false); });
   applyTheme(); render();
