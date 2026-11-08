@@ -11,7 +11,7 @@
   /* ---------------- state ---------------- */
   const def = () => ({
     profile: { name: '', examDate: '', level: 'A/L' },
-    settings: { key: '', model: 'gemini-2.5-flash', lang: 'en-US', speak: false, theme: 'auto' },
+    settings: { key: '', model: 'gemini-flash-latest', lang: 'en-US', speak: false, theme: 'auto' },
     goal: 120, mode: 'hints', tutorSubject: '',
     subjects: [], sessions: [], marks: [], tasks: [], quizzes: [], chat: [], plan: null, timer: null, tutor: null
   });
@@ -76,10 +76,19 @@
     if (status >= 500) return 'The AI service is busy. Please try again in a moment.';
     return msg || 'Request failed (' + status + ')';
   }
+  async function listModels(key) {
+    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': key } });
+    if (!r.ok) throw new Error(friendly(r.status, ''));
+    const j = await r.json();
+    const ver = n => parseFloat(n.match(/gemini-([\d.]+)/)[1]);
+    return (j.models || []).filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+      .map(m => m.name.replace(/^models\//, '')).filter(n => /^gemini-[\d.]+-flash(-lite)?$/.test(n))
+      .sort((a, b) => (ver(b) - ver(a)) || (a.includes('lite') - b.includes('lite')));
+  }
   async function gem(o) {
     const key = S.settings.key.trim();
     if (!key) throw new Error('Add your free Gemini API key in Settings first.');
-    const model = S.settings.model || 'gemini-2.5-flash';
+    const model = S.settings.model || 'gemini-flash-latest';
     const body = { contents: o.contents, generationConfig: { temperature: o.temp ?? 0.5 } };
     if (o.system) body.systemInstruction = { parts: [{ text: o.system }] };
     if (o.json) body.generationConfig.responseMimeType = 'application/json';
@@ -88,6 +97,10 @@
     const doFetch = () => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body), signal: o.signal });
     let r = await doFetch();
     if (r.status === 503) { await new Promise(s => setTimeout(s, 1500)); r = await doFetch(); }
+    if (r.status === 404 && !o.retried) {
+      const names = await listModels(key).catch(() => []);
+      if (names.length && names[0] !== model) { S.settings.model = names[0]; save(); toast('Switched to model ' + names[0]); return gem(Object.assign({}, o, { retried: true })); }
+    }
     if (!r.ok) { let m = ''; try { m = (await r.json()).error.message; } catch (e) { /* ignore */ } throw new Error(friendly(r.status, m)); }
     const textOf = j => {
       const c = j.candidates && j.candidates[0];
@@ -300,10 +313,10 @@ Student context (use it to personalise, do not recite it): ${studentContext()}`;
       <form data-form="ai" class="fgrid">
         <label class="wide">Gemini API key<input name="key" type="password" autocomplete="off" value="${esc(S.settings.key)}" placeholder="AIza..."></label>
         <label>Model<input name="model" list="models" value="${esc(S.settings.model)}"></label>
-        <datalist id="models"><option>gemini-2.5-flash</option><option>gemini-2.5-flash-lite</option><option>gemini-2.5-pro</option></datalist>
+        <datalist id="models"><option>gemini-flash-latest</option><option>gemini-3.8-flash</option><option>gemini-3.6-flash</option><option>gemini-3.5-flash-lite</option><option>gemini-3.1-flash-lite</option></datalist>
         <label>Voice language<select name="lang">${[['en-US', 'English (US)'], ['en-GB', 'English (UK)'], ['si-LK', 'Sinhala'], ['ta-LK', 'Tamil']].map(([v, n]) => `<option value="${v}"${v === S.settings.lang ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
         <label class="check"><input type="checkbox" name="speak" ${S.settings.speak ? 'checked' : ''}> Read replies aloud automatically</label>
-        <button class="btn primary">Save</button><button type="button" class="btn" data-act="testKey">Test key</button></form></section>
+        <button class="btn primary">Save</button><button type="button" class="btn" data-act="testKey">Test key</button><button type="button" class="btn" data-act="findModels">Find my models</button></form></section>
     <section class="card"><h3>Appearance & app</h3><div class="row wrap">
       <select id="theme">${[['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']].map(([v, n]) => `<option value="${v}"${v === S.settings.theme ? ' selected' : ''}>${n}</option>`).join('')}</select>
       <button class="btn" data-act="install" id="installBtn" hidden>Install app</button></div></section>
@@ -526,8 +539,20 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
       pendingPrompt = `I got this quiz question wrong. Please help me understand it.\n\nQuestion: ${q.q}\nMy answer: ${q.options[Q.answers[+el.dataset.i]] || '(none)'}\nCorrect answer: ${q.options[q.answer]}`;
       S.tutorSubject = Q.meta.subjectId || ''; go('tutor');
     },
+    async findModels(el) {
+      const f = el.closest('form'), key = f.key.value.trim();
+      if (!key) return toast('Paste your API key first');
+      el.disabled = true;
+      try {
+        const names = await listModels(key);
+        if (!names.length) return toast('No Gemini Flash models found for this key');
+        $('#models').innerHTML = names.map(n => `<option>${n}</option>`).join('');
+        f.model.value = names[0]; toast('Found ' + names.length + ' models. Using ' + names[0] + '. Press Save.');
+      } catch (e) { toast(e.message); }
+      el.disabled = false;
+    },
     async testKey(el) {
-      const f = el.closest('form'); S.settings.key = f.key.value.trim(); S.settings.model = f.model.value.trim() || 'gemini-2.5-flash'; save();
+      const f = el.closest('form'); S.settings.key = f.key.value.trim(); S.settings.model = f.model.value.trim() || 'gemini-flash-latest'; save();
       el.disabled = true; el.textContent = 'Testing…';
       try { await ask('Reply with the single word: OK'); toast('✅ Key works'); } catch (e) { toast(e.message); }
       el.disabled = false; el.textContent = 'Test key';
@@ -567,7 +592,7 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
     else if (k === 'task') { S.tasks.push({ id: uid(), title: v('title').trim(), subjectId: v('subjectId'), pri: v('pri'), due: v('due'), done: false }); }
     else if (k === 'subject') { S.subjects.push({ id: uid(), name: v('name').trim(), target: Math.min(100, Math.max(1, +v('target'))), color: v('color') }); }
     else if (k === 'profile') { S.profile.name = v('name').trim(); S.profile.level = v('level'); S.profile.examDate = v('examDate'); S.goal = Math.max(15, +v('goal') || 120); }
-    else if (k === 'ai') { S.settings.key = v('key').trim(); S.settings.model = v('model').trim() || 'gemini-2.5-flash'; S.settings.lang = v('lang'); S.settings.speak = f.elements.speak.checked; }
+    else if (k === 'ai') { S.settings.key = v('key').trim(); S.settings.model = v('model').trim() || 'gemini-flash-latest'; S.settings.lang = v('lang'); S.settings.speak = f.elements.speak.checked; }
     else if (k === 'quizstart') { return makeQuiz(f); }
     else if (k === 'quizsubmit') {
       Q.answers = Q.items.map((_, i) => { const c = f.querySelector(`input[name=q${i}]:checked`); return c ? +c.value : -1; });
