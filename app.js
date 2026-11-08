@@ -100,7 +100,8 @@
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) +
       (o.stream ? ':streamGenerateContent?alt=sse' : ':generateContent');
     const doFetch = () => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body), signal: o.signal });
-    let r = await doFetch();
+    const tt0 = Date.now(); let r = await doFetch();
+    dbg('gemini ' + model + (o.stream ? ' (stream)' : '') + ' → ' + r.status + ' in ' + (Date.now() - tt0) + 'ms');
     if (r.status === 503) { await new Promise(s => setTimeout(s, 1500)); r = await doFetch(); }
     if (r.status === 404 && !o.retried) {
       const names = await listModels(key).catch(() => []);
@@ -354,6 +355,7 @@ Student context (use it to personalise, do not recite it): ${studentContext()}`;
         <label>Browser voice language (fallback)<select name="lang">${[['en-US', 'English (US)'], ['en-GB', 'English (UK)'], ['si-LK', 'Sinhala'], ['ta-LK', 'Tamil']].map(([v, n]) => `<option value="${v}"${v === S.settings.lang ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
         <label class="check"><input type="checkbox" name="speak" ${S.settings.speak ? 'checked' : ''}> Read tutor replies aloud automatically (voice chat always does)</label>
         <button class="btn primary">Save</button><button type="button" class="btn" data-act="previewVoice">▶ Preview voice</button><button type="button" class="btn" data-act="findTts">Find voice model</button></form></section>
+    <section class="card"><h3>Troubleshooting</h3><p class="muted">If voice or the tutor seems stuck, press this and send me the text.</p><button class="btn" data-act="showLog">Show / copy log</button><pre id="dbg" class="log" hidden></pre></section>
     <section class="card"><h3>Appearance & app</h3><div class="row wrap">
       <select id="theme">${[['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']].map(([v, n]) => `<option value="${v}"${v === S.settings.theme ? ' selected' : ''}>${n}</option>`).join('')}</select>
       <button class="btn" data-act="install" id="installBtn" hidden>Install app</button></div></section>
@@ -489,7 +491,8 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
     S.chat.push(ai);
     const now = Date.now();
     S.tutor = S.tutor ? Object.assign(S.tutor, { last: now }) : { start: now - 60000, last: now, subjectId: S.tutorSubject };
-    busy = true; abortCtl = new AbortController(); renderAttach(); renderMsgs(); if (voiceMode) setVStat('💭 Thinking…');
+    busy = true; abortCtl = new AbortController(); renderAttach(); renderMsgs();
+    const tt = Date.now(), typer = setInterval(() => { if (ai.text) return clearInterval(typer); const el = $('#msgs .msg:last-child .bub'); if (el) el.innerHTML = '<span class="typing"><i></i><i></i><i></i></span> <small>' + Math.round((Date.now() - tt) / 1000) + 's</small>'; }, 1000); if (voiceMode) setVStat('💭 Thinking…', 'cancel');
     const hist = S.chat.slice(0, -1).slice(-17);
     const lastUsers = hist.map((m, i) => (m.role === 'user' ? i : -1)).filter(i => i >= 0).slice(-3);
     const contents = hist.map((m, i) => {
@@ -500,13 +503,13 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
     });
     while (contents.length && contents[0].role !== 'user') contents.shift();
     try {
-      await gem({ system: tutorSystem(), contents, stream: true, signal: abortCtl.signal, temp: 0.4, timeout: 180000, onChunk: t => { ai.text = t; const el = $('#msgs .msg:last-child .bub'); if (el) { el.innerHTML = md(t); const m = $('#msgs'); if (m.scrollHeight - m.scrollTop - m.clientHeight < 160) m.scrollTop = m.scrollHeight; } } });
+      await gem({ system: tutorSystem(), contents, stream: true, signal: abortCtl.signal, temp: 0.4, timeout: 180000, fast: voiceMode, onChunk: t => { ai.text = t; const el = $('#msgs .msg:last-child .bub'); if (el) { el.innerHTML = md(t); const m = $('#msgs'); if (m.scrollHeight - m.scrollTop - m.clientHeight < 160) m.scrollTop = m.scrollHeight; } } });
       if (!ai.text) { ai.text = 'I could not produce an answer. Please rephrase or try again.'; ai.err = true; }
     } catch (e) {
       if (e.name === 'AbortError') { if (!ai.text) ai.text = '(stopped)'; }
       else { ai.text = (ai.text ? ai.text + '\n\n' : '') + '⚠️ ' + e.message; ai.err = true; }
     }
-    busy = false; abortCtl = null;
+    busy = false; abortCtl = null; clearInterval(typer);
     if (S.chat.length > 80) S.chat = S.chat.slice(-80);
     S.tutor.last = Date.now(); save(); renderMsgs(); setVStat('');
     if (!ai.err && (voiceMode || S.settings.speak)) speak(ai.text, () => { if (voiceMode) listen(); });
@@ -536,7 +539,17 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
   let audioEl = null, speakTok = 0, ttsCtl = null, ttsFmt = 'new', ttsWarned = false;
   const getAudio = () => { if (!audioEl) audioEl = new Audio(); return audioEl; };
   function unlockAudio() { try { const a = getAudio(); a.src = URL.createObjectURL(new Blob([pcmToWav(new Uint8Array(2), 8000)], { type: 'audio/wav' })); a.play().catch(() => { }); } catch (e) { /* ignore */ } }
-  const setVStat = t => { const e = $('#vstat'); if (e) { e.textContent = t || ''; e.hidden = !t; } };
+  const dbgLines = [];
+  function dbg(m) { dbgLines.push(new Date().toTimeString().slice(0, 8) + ' ' + m); if (dbgLines.length > 80) dbgLines.shift(); }
+  let vText = '', vBtn = '', vT0 = 0, vTick = null, trCtl = null;
+  function renderV() {
+    const e = $('#vstat'); if (!e) return;
+    if (!vText) { e.hidden = true; e.innerHTML = ''; return; }
+    const sec = Math.round((Date.now() - vT0) / 1000);
+    e.hidden = false;
+    e.innerHTML = '<span>' + vText + (sec >= 4 ? ' ' + sec + 's' : '') + '</span>' + (vBtn === 'listen' ? '<button type="button" class="chip" data-act="vDone">✓ Done speaking</button>' : '') + (vBtn ? '<button type="button" class="chip" data-act="vCancel">✕ Cancel</button>' : '');
+  }
+  function setVStat(t, btn) { if ((t || '') !== vText) vT0 = Date.now(); vText = t || ''; vBtn = btn || ''; clearInterval(vTick); if (vText) vTick = setInterval(renderV, 1000); renderV(); }
   function stopSpeaking() {
     speakTok++; speaking = false;
     if (ttsCtl) { try { ttsCtl.abort(); } catch (e) { /* ignore */ } ttsCtl = null; }
@@ -561,7 +574,7 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
     return ((await r.json()).models || []).map(m => m.name.replace(/^models\//, '')).filter(n => /tts/.test(n))
       .sort((a, b) => (/preview/.test(a) - /preview/.test(b)) || (/lite/.test(a) - /lite/.test(b)) || (ver(b) - ver(a)));
   }
-  async function ttsFetch(text, signal) {
+  async function ttsFetchRaw(text, signal) {
     const key = S.settings.key.trim(); if (!key) throw new Error('Add your Gemini key in Settings');
     const style = S.settings.style, voice = S.settings.voice || 'Sulafat';
     const make = fmt => (fmt === 'new'
@@ -588,6 +601,13 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
     const wav = /wav/i.test(mt) ? bytes : pcmToWav(bytes, +((mt.match(/rate=(\d+)/) || [])[1]) || 24000);
     return URL.createObjectURL(new Blob([wav], { type: 'audio/wav' }));
   }
+  async function ttsFetch(text, outer) {
+    const c = new AbortController(), to = setTimeout(() => c.abort(), 30000), t0 = Date.now();
+    if (outer) outer.addEventListener('abort', () => c.abort());
+    try { const u = await ttsFetchRaw(text, c.signal); dbg('tts ok in ' + (Date.now() - t0) + 'ms (' + text.length + ' chars)'); return u; }
+    catch (e) { dbg('tts failed after ' + (Date.now() - t0) + 'ms: ' + (e.name === 'AbortError' ? 'timeout' : e.message)); throw e; }
+    finally { clearTimeout(to); }
+  }
   function playUrl(url) {
     return new Promise((res, rej) => {
       const a = getAudio(), sp = Math.min(1.5, Math.max(0.6, +S.settings.speed || 1));
@@ -600,12 +620,12 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
     stopSpeaking();
     const tok = speakTok, plain = L.speakable(text).slice(0, 2600);
     if (!plain) { done && done(); return; }
-    speaking = true; setVStat('🔊 Speaking… (tap 🎤 to stop)');
+    speaking = true; setVStat('🔊 Speaking…', 'cancel');
     const fin = () => { if (tok !== speakTok) return; speaking = false; setVStat(''); done && done(); };
     if (S.settings.tts === 'gemini' && S.settings.key.trim()) {
       try {
         const ctl = new AbortController(); ttsCtl = ctl;
-        const parts = chunkText(plain, 900), start = i => { const p = ttsFetch(parts[i], ctl.signal); p.catch(() => { }); return p; };
+        const parts = chunkText(plain, 380), start = i => { const p = ttsFetch(parts[i], ctl.signal); p.catch(() => { }); return p; };
         let next = start(0);
         for (let i = 0; i < parts.length; i++) {
           const url = await next; if (tok !== speakTok) { URL.revokeObjectURL(url); return; }
@@ -615,8 +635,8 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
         }
         return fin();
       } catch (e) {
-        if (tok !== speakTok || e.name === 'AbortError') return;
-        if (!ttsWarned) { toast('Natural voice unavailable (' + e.message + '). Using the browser voice.'); ttsWarned = true; }
+        if (tok !== speakTok) return;
+        toast('Natural voice failed (' + (e.name === 'AbortError' ? 'took too long' : e.message) + '). Using the browser voice this time.');
       }
     }
     if (!('speechSynthesis' in window)) { toast('Reading aloud is not supported here'); return fin(); }
@@ -645,10 +665,10 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
   let mrec = null, vadTimer = null, recCancel = false, manualStop = false;
   function stopRecording(cancel, manual) { recCancel = !!cancel; manualStop = !!manual; clearInterval(vadTimer); try { if (mrec && mrec.state !== 'inactive') mrec.stop(); } catch (e) { /* ignore */ } }
   function listen() { return S.settings.listen === 'browser' ? listenBrowser() : recordTurn(false); }
-  async function transcribe(blob) {
-    const data = await blobToWav16kB64(blob);
+  async function transcribe(blob, signal) {
+    const data = await blobToWav16kB64(blob); dbg('audio converted: ' + Math.round(data.length * 0.75 / 1024) + ' KB wav');
     const prompt = 'Transcribe the speech in this audio exactly as spoken. The speaker may speak Sinhala, English, or mix both in one sentence. Write Sinhala words in Sinhala script and English words in English letters; maths and science terms said in English stay in English. Output ONLY the transcript. If there is no clear human speech, output exactly: [none]';
-    const t = await gem({ contents: [{ role: 'user', parts: [{ inlineData: { mimeType: 'audio/wav', data } }, { text: prompt }] }], fast: true, temp: 0, timeout: 60000 });
+    const t = await gem({ contents: [{ role: 'user', parts: [{ inlineData: { mimeType: 'audio/wav', data } }, { text: prompt }] }], fast: true, temp: 0, timeout: 40000, signal });
     const x = (t || '').trim().replace(/^["“”]+|["“”]+$/g, '').trim();
     return /^\[?\s*none\s*\]?\.?$/i.test(x) ? '' : x;
   }
@@ -659,32 +679,38 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
     try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
     catch (e) { toast('Microphone permission was blocked.'); voiceMode = false; updMic(); return; }
     const chunks = [], mr = new MediaRecorder(stream), AC = window.AudioContext || window.webkitAudioContext, ac = new AC(), an = ac.createAnalyser();
+    if (ac.state === 'suspended') ac.resume().catch(() => { });
     mrec = mr; recCancel = false; manualStop = false; an.fftSize = 1024; ac.createMediaStreamSource(stream).connect(an);
-    const buf = new Float32Array(an.fftSize), t0 = Date.now(), calib = []; let spoke = false, last = 0, floor = 0.012;
+    const buf = new Float32Array(an.fftSize), t0 = Date.now(), calib = []; let spoke = false, last = 0, floor = 0.012, maxRms = 0, noVad = false;
     mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
     const db = $('#dictBtn'); if (db) db.classList.toggle('live', !!dictate);
-    setVStat(dictate ? '🎙️ Speak… tap 🎙️ again to finish' : '🎤 Listening… speak now');
+    setVStat(dictate ? '🎙️ Speak now' : '🎤 Listening… speak now', 'listen');
     mr.start(250);
     vadTimer = setInterval(() => {
       an.getFloatTimeDomainData(buf); let sum = 0; for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
       const rms = Math.sqrt(sum / buf.length), now = Date.now();
       if (now - t0 < 300) { calib.push(rms); floor = Math.min(0.04, Math.max(0.012, calib.reduce((a, b) => a + b, 0) / calib.length * 2.5)); return; }
+      if (rms > maxRms) maxRms = rms;
+      if (!spoke && !noVad && now - t0 > 1800 && maxRms === 0) { noVad = true; spoke = true; dbg('mic level meter is silent: manual stop only'); }
+      if (noVad) last = now;
       if (rms > floor) { spoke = true; last = now; }
       if ((spoke && now - last > 1500) || (!spoke && now - t0 > 9000) || now - t0 > 45000) stopRecording(false, false);
     }, 100);
     mr.onstop = async () => {
       clearInterval(vadTimer); stream.getTracks().forEach(t => t.stop()); ac.close().catch(() => { }); mrec = null;
       const b = $('#dictBtn'); if (b) b.classList.remove('live');
+      dbg('recorded ' + Math.round((Date.now() - t0) / 1000) + 's, ' + chunks.reduce((a, c) => a + c.size, 0) + ' bytes, speech=' + spoke + ', maxLevel=' + maxRms.toFixed(3) + ', floor=' + floor.toFixed(3));
       if (recCancel) { setVStat(''); return; }
       if (!spoke && !manualStop) { setVStat(''); if (voiceMode && !busy && !speaking) setTimeout(() => voiceMode && !busy && !speaking && listen(), 300); return; }
-      setVStat('✍️ Understanding…');
+      setVStat('✍️ Understanding…', 'cancel');
       try {
-        const text = await transcribe(new Blob(chunks, { type: mr.mimeType || 'audio/webm' }));
+        trCtl = new AbortController(); const tr0 = Date.now();
+        const text = await transcribe(new Blob(chunks, { type: mr.mimeType || 'audio/webm' }), trCtl.signal); trCtl = null; dbg('transcript in ' + (Date.now() - tr0) + 'ms: ' + text.slice(0, 60));
         setVStat('');
         if (!text) { toast("I didn't catch that. Please try again."); if (voiceMode && !busy && !speaking) listen(); return; }
         if (dictate) { const ta = $('#chatin'); if (ta) { ta.value = (ta.value ? ta.value + ' ' : '') + text; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.focus(); } return; }
         send(text);
-      } catch (e) { setVStat(''); toast(e.message || 'Could not understand the audio'); voiceMode = false; updMic(); }
+      } catch (e) { setVStat(''); trCtl = null; dbg('listen error: ' + e.message); if (e.name !== 'AbortError') toast(e.message || 'Could not understand the audio'); voiceMode = false; updMic(); }
     };
   }
   function readVoiceForm(f, quiet) {
@@ -737,6 +763,12 @@ Rules: exactly 4 options per question; "answer" is the 0-based index of the sing
       if (voiceMode) { unlockAudio(); stopSpeaking(); listen(); }
       else { stopRecording(true); try { rec && rec.abort(); } catch (e) { /* ignore */ } stopSpeaking(); setVStat(''); }
     },
+    vDone() { stopRecording(false, true); },
+    vCancel() {
+      voiceMode = false; updMic(); stopRecording(true); try { rec && rec.abort(); } catch (e) { /* ignore */ }
+      if (trCtl) trCtl.abort(); if (abortCtl) abortCtl.abort(); stopSpeaking(); setVStat('');
+    },
+    showLog() { const pre = $('#dbg'), t = dbgLines.join('\n') || '(nothing logged yet: try the voice chat first)'; pre.textContent = t; pre.hidden = false; if (navigator.clipboard) navigator.clipboard.writeText(t).then(() => toast('Log copied'), () => { }); },
     dictate() { if (mrec) return stopRecording(false, true); unlockAudio(); voiceMode = false; updMic(); stopSpeaking(); recordTurn(true); },
     async previewVoice(el) {
       readVoiceForm(el.closest('form'), true); unlockAudio(); el.disabled = true;
